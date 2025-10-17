@@ -39,7 +39,7 @@ if [[ "$old_imsi" == "$new_imsi" ]]; then
 fi
 old_imei=$(READ_IMEI)
 mcu_send_message "Setting random   IMEI"
-timeout 15 python3 /lib/blue-merle/imei_generate.py -r
+timeout 15 /lib/blue-merle/imei_generate.lua -r
 
 new_imei=$(READ_IMEI)
 

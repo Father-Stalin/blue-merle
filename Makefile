@@ -12,7 +12,7 @@ include $(INCLUDE_DIR)/package.mk
 define Package/blue-merle
 	SECTION:=utils
 	CATEGORY:=Utilities
-	EXTRA_DEPENDS:=luci-base, gl-sdk4-mcu, coreutils-shred, python3-pyserial
+	EXTRA_DEPENDS:=luci-base, gl-sdk4-mcu, coreutils-shred, lua, python3
 	TITLE:=Anonymity Enhancements for GL-E750 Mudi
 endef
 
@@ -32,7 +32,7 @@ define Package/blue-merle/install
 	$(INSTALL_BIN) ./files/etc/gl-switch.d/* $(1)/etc/gl-switch.d/
 	$(INSTALL_BIN) ./files/usr/bin/* $(1)/usr/bin/
 	$(INSTALL_BIN) ./files/usr/libexec/blue-merle $(1)/usr/libexec/blue-merle
-	$(INSTALL_BIN) ./files/lib/blue-merle/imei_generate.py  $(1)/lib/blue-merle/imei_generate.py
+	$(INSTALL_BIN) ./files/lib/blue-merle/imei_generate.lua $(1)/lib/blue-merle/imei_generate.lua
 endef
 
 define Package/blue-merle/preinst

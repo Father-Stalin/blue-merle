@@ -49,7 +49,7 @@ done
 ## the SIM card has been replaced. We intend to prevent an accidential
 ## leak of the new SIM's IMSI with the old IMEI just in case the modem
 ## accidentally tried to log in to the network.
-python3 /lib/blue-merle/imei_generate.py -r
+/lib/blue-merle/imei_generate.lua -r
 
 
 echo -n "Please now replace the SIM card and press any key to continue. "
@@ -93,9 +93,9 @@ case $answer in
         *) answer=1;;
 esac                                            
 if [[ "$answer" -eq 1 ]]; then                  
-	python3 /lib/blue-merle/imei_generate.py -r
+	/lib/blue-merle/imei_generate.lua -r
 else
-	python3 /lib/blue-merle/imei_generate.py -d
+	/lib/blue-merle/imei_generate.lua -d
 fi   
 
 new_imei=$(READ_IMEI)
