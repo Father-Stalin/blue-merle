@@ -4,9 +4,27 @@
 
 
 UNICAST_MAC_GEN () {
-    loc_mac_numgen=`python3 -c "import random; print(f'{random.randint(0,2**48) & 0b111111101111111111111111111111111111111111111111:0x}'.zfill(12))"`
-    loc_mac_formatted=$(echo "$loc_mac_numgen" | sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\)\(..\).*$/\1:\2:\3:\4:\5:\6/')
-    echo "$loc_mac_formatted"
+    local mac
+
+    mac=$(lua - <<'EOF'
+local urandom = io.open("/dev/urandom", "rb")
+if not urandom then os.exit(1) end
+
+local bytes = urandom:read(6)
+urandom:close()
+
+if not bytes or #bytes ~= 6 then os.exit(1) end
+
+local b = {bytes:byte(1, 6)}
+
+-- Clear multicast bit, set locally administered bit
+b[1] = (b[1] - (b[1] % 4)) + 2
+
+io.write(string.format("%02x:%02x:%02x:%02x:%02x:%02x", b[1], b[2], b[3], b[4], b[5], b[6]))
+EOF
+)
+    [ $? -eq 0 ] || return 1
+    echo "$mac"
 }
 
 # randomize BSSID
