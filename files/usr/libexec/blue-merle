@@ -8,6 +8,122 @@ show_message() {
     echo {\"msg\": \"$1\"} > /dev/ttyS0
 }
 
+ensure_mac_config_section() {
+    if ! uci -q get blue-merle.mac >/dev/null 2>&1; then
+        uci set blue-merle.mac=blue_merle
+    fi
+}
+
+sanitize_vendor_prefix() {
+    local prefix="$1"
+    local vendor=$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')
+
+    vendor=${vendor//[^0-9A-F]/}
+    vendor=${vendor:0:6}
+
+    if [ ${#vendor} -ne 6 ]; then
+        return 1
+    fi
+
+    printf '%s:%s:%s\n' "${vendor:0:2}" "${vendor:2:2}" "${vendor:4:2}"
+}
+
+parse_mac_list() {
+    local raw="$1"
+    local sanitized
+    local token
+
+    sanitized=$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]')
+    sanitized=$(printf '%s' "$sanitized" | tr ',\r\n' '   ')
+
+    for token in $sanitized; do
+        if mac=$(NORMALIZE_MAC "$token" 2>/dev/null); then
+            printf '%s\n' "$mac"
+        fi
+    done
+}
+
+random_choice_from_list() {
+    local list="$1"
+    local count=0
+    local choice=""
+    local value
+    local rand
+
+    for value in $list; do
+        count=$((count + 1))
+    done
+
+    if [ $count -eq 0 ]; then
+        return 1
+    fi
+
+    rand=$(dd if=/dev/urandom bs=2 count=1 2>/dev/null | od -An -tu2)
+    rand=${rand//[[:space:]]/}
+    if [ -z "$rand" ]; then
+        rand=0
+    fi
+    rand=$(( (rand % count) + 1 ))
+
+    count=0
+    for value in $list; do
+        count=$((count + 1))
+        if [ $count -eq $rand ]; then
+            choice="$value"
+            break
+        fi
+    done
+
+    if [ -z "$choice" ]; then
+        return 1
+    fi
+
+    printf '%s\n' "$choice"
+}
+
+apply_mac_settings() {
+    local wifi0="$1"
+    local wifi1="$2"
+    local device="$3"
+    local clone="$4"
+    local wireless_commit=0
+    local network_commit=0
+    local glconfig_commit=0
+    local applied=""
+
+    if [ -n "$wifi0" ] && SET_MAC_IF_AVAILABLE "wireless.@wifi-iface[0].macaddr" "$wifi0"; then
+        wireless_commit=1
+        applied="${applied}\"wireless0\":\"$wifi0\","
+    fi
+
+    if [ -n "$wifi1" ] && SET_MAC_IF_AVAILABLE "wireless.@wifi-iface[1].macaddr" "$wifi1"; then
+        wireless_commit=1
+        applied="${applied}\"wireless1\":\"$wifi1\","
+    fi
+
+    if [ -n "$device" ] && SET_MAC_IF_AVAILABLE "network.@device[1].macaddr" "$device"; then
+        network_commit=1
+        applied="${applied}\"network\":\"$device\","
+    fi
+
+    if [ -n "$clone" ] && SET_MAC_IF_AVAILABLE "glconfig.general.macclone_addr" "$clone"; then
+        glconfig_commit=1
+        applied="${applied}\"macclone\":\"$clone\","
+    fi
+
+    [ $wireless_commit -eq 1 ] && uci commit wireless
+    [ $network_commit -eq 1 ] && uci commit network
+    [ $glconfig_commit -eq 1 ] && uci commit glconfig
+
+    if [ -n "$applied" ]; then
+        applied="{${applied%?}}"
+    else
+        applied="{}"
+    fi
+
+    printf '%s\n' "$applied"
+}
+
 
 logger -p notice -t blue-merle-libexec  "Libexec $1"
 
@@ -42,6 +158,75 @@ elif [ "$1" == "shutdown" ]; then
 elif [ "$1" == "write-imei" ]; then
     new_imei=$2
     echo -n  { "action": "write" }
+
+elif [ "$1" == "mac-config" ]; then
+    ensure_mac_config_section
+
+    mode=$(uci -q get blue-merle.mac.mode)
+    vendor=$(uci -q get blue-merle.mac.vendor_prefix)
+    static=$(uci -q get blue-merle.mac.static_list)
+
+    mode=${mode:-vendor}
+    vendor=${vendor:-}
+    static=${static:-}
+
+    # Values are already sanitized when stored; output simple JSON
+    echo -n "{\"mode\":\"$mode\",\"vendor\":\"$vendor\",\"static\":\"$static\"}"
+
+elif [ "$1" == "apply-mac" ]; then
+    mode="$2"
+    data="$3"
+    ensure_mac_config_section
+
+    if [ "$mode" = "vendor" ]; then
+        vendor=$(sanitize_vendor_prefix "$data")
+        if [ $? -ne 0 ]; then
+            echo "Invalid vendor prefix" >&2
+            exit 1
+        fi
+
+        wifi0=$(MAC_FROM_PREFIX "$vendor") || exit 1
+        wifi1=$(MAC_FROM_PREFIX "$vendor") || exit 1
+        device=$(MAC_FROM_PREFIX "$vendor") || exit 1
+        clone=$(MAC_FROM_PREFIX "$vendor") || exit 1
+
+        uci set blue-merle.mac.mode='vendor'
+        uci set blue-merle.mac.vendor_prefix="$vendor"
+        uci delete blue-merle.mac.static_list 2>/dev/null
+
+        applied_json=$(apply_mac_settings "$wifi0" "$wifi1" "$device" "$clone")
+        uci commit blue-merle
+
+        echo -n "{\"status\":\"ok\",\"mode\":\"vendor\",\"vendor\":\"$vendor\",\"assigned\":$applied_json}"
+
+    elif [ "$mode" = "explicit" ]; then
+        list=$(parse_mac_list "$data")
+        if [ -z "$list" ]; then
+            echo "No valid MAC addresses provided" >&2
+            exit 1
+        fi
+
+        # convert back to space separated for config storage
+        config_list=$(printf '%s\n' "$list" | tr '\n' ' ')
+        config_list=$(printf '%s' "$config_list" | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//')
+
+        wifi0=$(random_choice_from_list "$list") || exit 1
+        wifi1=$(random_choice_from_list "$list") || exit 1
+        device=$(random_choice_from_list "$list") || exit 1
+        clone=$(random_choice_from_list "$list") || exit 1
+
+        uci set blue-merle.mac.mode='explicit'
+        uci set blue-merle.mac.static_list="$config_list"
+        uci delete blue-merle.mac.vendor_prefix 2>/dev/null
+
+        applied_json=$(apply_mac_settings "$wifi0" "$wifi1" "$device" "$clone")
+        uci commit blue-merle
+
+        echo -n "{\"status\":\"ok\",\"mode\":\"explicit\",\"assigned\":$applied_json}"
+    else
+        echo "Unknown mode '$mode'" >&2
+        exit 1
+    fi
 else
     echo -n   '{"msg":"Hello, World!"}'
     #echo 'foo'>&2

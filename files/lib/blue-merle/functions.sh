@@ -46,6 +46,59 @@ RANDOMIZE_MACADDR () {
     # You need to restart the network, i.e. /etc/init.d/network restart
 }
 
+NORMALIZE_MAC () {
+    local mac="$1"
+
+    mac=$(printf '%s' "$mac" | tr '[:lower:]' '[:upper:]')
+    mac=${mac//[^0-9A-F]/}
+
+    if [ ${#mac} -ne 12 ]; then
+        return 1
+    fi .    
+    printf '%s:%s:%s:%s:%s:%s\n' \
+        "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" \
+        "${mac:6:2}" "${mac:8:2}" "${mac:10:2}"
+}
+
+MAC_FROM_PREFIX () {
+    local prefix="$1"
+    local vendor rand mac
+
+    vendor=$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')
+    vendor=${vendor//[^0-9A-F]/}
+    vendor=${vendor:0:6}
+
+    if [ ${#vendor} -ne 6 ]; then
+        return 1
+    fi
+
+    rand=$(dd if=/dev/urandom bs=3 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    if [ ${#rand} -ne 6 ]; then
+        return 1
+    fi
+
+    mac="${vendor}${rand}"
+    printf '%s:%s:%s:%s:%s:%s\n' \
+        "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" \
+        "${mac:6:2}" "${mac:8:2}" "${mac:10:2}"
+}
+
+SET_MAC_IF_AVAILABLE () {
+    local uci_path="$1"
+    local mac="$2"
+
+    if [ -z "$uci_path" ] || [ -z "$mac" ]; then
+        return 1
+    fi
+
+    if uci -q get "$uci_path" >/dev/null 2>&1; then
+        uci set "$uci_path"="$mac"
+        return 0
+    fi
+
+    return 1
+}
+
 READ_ICCID() {
     gl_modem AT AT+CCID
 }

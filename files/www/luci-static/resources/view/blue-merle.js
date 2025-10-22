@@ -109,21 +109,22 @@ function handleReset(ev)
 }
 
 
-function callBlueMerle(arg) {
+function callBlueMerle() {
     const cmd = "/usr/libexec/blue-merle";
-    var prom = fs.exec(cmd, [arg]);
+    var args = Array.prototype.slice.call(arguments);
+    var prom = fs.exec(cmd, args);
     return prom.then(
         function(res) {
-            console.log("Blue Merle arg", arg, "res", res);
+            console.log("Blue Merle args", args, "res", res);
             if (res.code != 0) {
                 throw new Error("Return code " + res.code);
             } else {
-                return res.stdout;
+                return (res.stdout || '').trim();
             }
         }
     ).catch(
         function(err) {
-            console.log("Error calling Blue Merle", arg, err);
+            console.log("Error calling Blue Merle", args, err);
             throw err;
         }
     );
@@ -342,6 +343,33 @@ function handleUpload(ev)
 function handleInput(ev) {
 }
 
+function readMacConfig() {
+    return callBlueMerle("mac-config").then(function(res) {
+        if (!res)
+            return {};
+
+        try {
+            return JSON.parse(res);
+        } catch (err) {
+            console.warn('Unable to parse mac-config payload', res, err);
+            return {};
+        }
+    });
+}
+
+function applyMacSettings(mode, value) {
+    return callBlueMerle("apply-mac", mode, value).then(function(res) {
+        if (!res)
+            return {};
+
+        try {
+            return JSON.parse(res);
+        } catch (err) {
+            throw new Error(_('Unexpected response while applying MAC settings.'));
+        }
+    });
+}
+
 return view.extend({
 	load: function() {
 	},
@@ -351,6 +379,68 @@ return view.extend({
 
         const imeiInputID = 'imei-input';
         const imsiInputID = 'imsi-input';
+        const macVendorRadioID = 'mac-mode-vendor';
+        const macVendorInputID = 'mac-vendor-input';
+        const macExplicitRadioID = 'mac-mode-explicit';
+        const macExplicitInputID = 'mac-explicit-input';
+        const macApplyButtonID = 'mac-apply-button';
+
+        function updateMacModeState() {
+            var vendorRadio = document.getElementById(macVendorRadioID);
+            var vendorInput = document.getElementById(macVendorInputID);
+            var explicitRadio = document.getElementById(macExplicitRadioID);
+            var explicitInput = document.getElementById(macExplicitInputID);
+
+            if (vendorRadio && explicitRadio && !vendorRadio.checked && !explicitRadio.checked && !isReadonlyView)
+                vendorRadio.checked = true;
+
+            if (vendorInput)
+                vendorInput.disabled = !(vendorRadio && vendorRadio.checked);
+
+            if (explicitInput)
+                explicitInput.disabled = !(explicitRadio && explicitRadio.checked);
+        }
+
+        function handleMacModeChange(ev) {
+            updateMacModeState();
+        }
+
+        function handleMacApply(ev) {
+            ev.preventDefault();
+
+            var selected = document.querySelector('input[name="mac-mode"]:checked');
+            if (!selected) {
+                ui.addNotification(null, E('p', {}, _('Please choose a MAC configuration option.')));
+                return;
+            }
+
+            var mode = selected.value;
+            var input = document.getElementById(mode === 'vendor' ? macVendorInputID : macExplicitInputID);
+            var data = (input ? input.value : '').trim();
+
+            if (!data) {
+                ui.addNotification(null, E('p', {}, _('Please provide MAC data before applying.')));
+                return;
+            }
+
+            ui.showModal(_('Applying MAC settings'), [
+                E('p', { 'class': 'spinning' }, _('Updating configuration…'))
+            ]);
+
+            applyMacSettings(mode, data).then(function(result) {
+                ui.hideModal();
+
+                var assigned = result.assigned || {};
+                var details = Object.keys(assigned).map(function(key) {
+                    return key + ': ' + assigned[key];
+                }).join(', ');
+
+                ui.addNotification(_('MAC settings updated'), E('p', {}, details || _('Configuration saved.')));
+            }).catch(function(err) {
+                ui.hideModal();
+                ui.addNotification(_('MAC update failed'), E('p', {}, '' + err));
+            });
+        }
 
 		var view = E([], [
 			E('style', { 'type': 'text/css' }, [ css ]),
@@ -374,6 +464,61 @@ return view.extend({
 						//, E('button', { 'class': 'btn cbi-button', 'click': handleReset }, [ _('Clear') ])
 					])
 				]),
+			]),
+
+			E('div', { 'class': 'controls' }, [
+				E('div', {}, [
+					E('label', { 'for': macVendorInputID }, _('Vendor OUI prefix') + ':'),
+					E('span', { 'class': 'control-group' }, [
+						E('input', {
+							'id': macVendorRadioID,
+							'type': 'radio',
+							'name': 'mac-mode',
+							'value': 'vendor',
+							'change': handleMacModeChange,
+							'disabled': isReadonlyView
+						}),
+						' ',
+						E('label', { 'for': macVendorRadioID }, _('Generate with vendor bytes')),
+						E('input', {
+							'id': macVendorInputID,
+							'type': 'text',
+							'placeholder': _('e.g. 00:11:22'),
+							'disabled': true
+						})
+					])
+				]),
+
+				E('div', {}, [
+					E('label', { 'for': macExplicitInputID }, _('Explicit MAC choices') + ':'),
+					E('span', { 'class': 'control-group' }, [
+						E('input', {
+							'id': macExplicitRadioID,
+							'type': 'radio',
+							'name': 'mac-mode',
+							'value': 'explicit',
+							'change': handleMacModeChange,
+							'disabled': isReadonlyView
+						}),
+						' ',
+						E('label', { 'for': macExplicitRadioID }, _('Use provided MAC addresses')),
+						E('textarea', {
+							'id': macExplicitInputID,
+							'rows': 3,
+							'placeholder': _('One MAC per line, e.g. AA:BB:CC:DD:EE:FF'),
+							'disabled': true
+						})
+					])
+				]),
+
+				E('div', {}, [
+					E('button', {
+						'id': macApplyButtonID,
+						'class': 'btn cbi-button-action',
+						'click': handleMacApply,
+						'disabled': isReadonlyView
+					}, [ _('Apply MAC settings') ])
+				])
 			]),
 
 			E('div', {}, [
@@ -410,6 +555,33 @@ return view.extend({
 		        e.value = "No IMSI found";
 		    }
 		)
+
+		readMacConfig().then(function(cfg) {
+		    var vendorRadio = document.getElementById(macVendorRadioID);
+		    var explicitRadio = document.getElementById(macExplicitRadioID);
+		    var vendorInput = document.getElementById(macVendorInputID);
+		    var explicitInput = document.getElementById(macExplicitInputID);
+
+		    if (vendorInput && cfg.vendor)
+		        vendorInput.value = cfg.vendor;
+
+		    if (explicitInput && cfg.static)
+		        explicitInput.value = cfg.static.replace(/\s+/g, '\n');
+
+		    if (cfg.mode === 'explicit') {
+		        if (explicitRadio)
+		            explicitRadio.checked = true;
+		    } else if (vendorRadio) {
+		        vendorRadio.checked = true;
+		    }
+
+		    updateMacModeState();
+		}).catch(function(err) {
+		    console.warn('Unable to load MAC configuration', err);
+		    updateMacModeState();
+		});
+
+		updateMacModeState();
 
 		return view;
 	},

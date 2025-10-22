@@ -3,11 +3,13 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=blue-merle
 PKG_VERSION:=2.0.5
 PKG_RELEASE:=$(AUTORELEASE)
+override PKG_FORMAT:=ipk
 
 PKG_MAINTAINER:=Matthias <matthias@srlabs.de>
 PKG_LICENSE:=BSD-3-Clause
 
 include $(INCLUDE_DIR)/package.mk
+-include $(INCLUDE_DIR)/package-ipkg.mk
 
 define Package/blue-merle
 	SECTION:=utils
