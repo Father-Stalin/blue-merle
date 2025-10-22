@@ -83,6 +83,79 @@ var css = '								\
 		width: 1.5em;					\
 		margin-left: -1.5em;			\
 	}									\
+										\
+	.mac-settings-container {			\
+		display: flex;					\
+		flex-wrap: wrap;				\
+		gap: 1em;						\
+		align-items: flex-start;			\
+		margin: 1em 0;					\
+	}									\
+										\
+	.mac-options {						\
+		flex: 2 1 320px;				\
+		display: flex;					\
+		flex-direction: column;			\
+		gap: .75em;						\
+	}									\
+										\
+	.mac-option {						\
+		display: flex;					\
+		flex-direction: column;			\
+		gap: .35em;						\
+		background: rgba(0,0,0,.03);	\
+		padding: .75em;					\
+		border-radius: 6px;				\
+	}									\
+										\
+	.mac-option-label {				\
+		font-weight: 600;				\
+	}									\
+										\
+	.mac-option .control-group {		\
+		display: flex;					\
+		align-items: center;				\
+		gap: .5em;						\
+	}									\
+										\
+	.mac-option textarea {				\
+		width: 100%;					\
+		resize: vertical;				\
+		min-height: 5.5em;				\
+	}									\
+										\
+	.mac-apply-btn {					\
+		align-self: flex-start;			\
+		padding: .35em .9em;			\
+		font-size: 90%;					\
+	}									\
+										\
+	.mac-status-card {					\
+		flex: 1 1 220px;				\
+		min-width: 220px;				\
+	}									\
+										\
+	.mac-status-card h4 {				\
+		margin: 0 0 .5em 0;				\
+	}									\
+										\
+	.mac-status-table {					\
+		width: 100%;					\
+		border-collapse: collapse;		\
+		font-size: 90%;					\
+	}									\
+										\
+	.mac-status-table th,				\
+	.mac-status-table td {				\
+		border-bottom: 1px solid #ddd;	\
+		padding: .35em .5em;			\
+		text-align: left;				\
+		word-break: break-all;			\
+	}									\
+										\
+	.mac-status-table tr:last-child td {\
+		border-bottom: none;			\
+	}									\
 ';
 
 var isReadonlyView = !L.hasViewPermission() || null;
@@ -101,6 +174,13 @@ var packages = {
 var languages = ['en'];
 
 var currentDisplayMode = 'available', currentDisplayRows = [];
+
+var macTargetDefinitions = [
+	{ key: 'wireless0', uci: 'wireless.@wifi-iface[0].macaddr' },
+	{ key: 'wireless1', uci: 'wireless.@wifi-iface[1].macaddr' },
+	{ key: 'network',   uci: 'network.@device[1].macaddr' },
+	{ key: 'macclone',  uci: 'glconfig.general.macclone_addr' }
+];
 
 
 
@@ -370,6 +450,20 @@ function applyMacSettings(mode, value) {
     });
 }
 
+function readCurrentMacs() {
+	return callBlueMerle("mac-status").then(function(res) {
+		if (!res)
+			return {};
+
+		try {
+			return JSON.parse(res);
+		} catch (err) {
+			console.warn('Unable to parse mac-status payload', res, err);
+			return {};
+		}
+	});
+}
+
 return view.extend({
 	load: function() {
 	},
@@ -381,17 +475,42 @@ return view.extend({
         const imsiInputID = 'imsi-input';
         const macVendorRadioID = 'mac-mode-vendor';
         const macVendorInputID = 'mac-vendor-input';
+        const macRandomRadioID = 'mac-mode-random';
         const macExplicitRadioID = 'mac-mode-explicit';
         const macExplicitInputID = 'mac-explicit-input';
         const macApplyButtonID = 'mac-apply-button';
+        const macStatusTableID = 'mac-status-table';
+        const macStatusConfig = [
+            { key: 'wireless0', label: _('Wi-Fi (2.4 GHz)') },
+            { key: 'wireless1', label: _('Wi-Fi (5 GHz)') },
+            { key: 'network', label: _('LAN device') },
+            { key: 'macclone', label: _('Upstream clone') }
+        ];
+
+        function updateMacStatusTable(values) {
+            var table = document.getElementById(macStatusTableID);
+            if (!table)
+                return;
+
+            macStatusConfig.forEach(function(entry) {
+                var cell = table.querySelector('tr[data-mac-key="' + entry.key + '"] td.mac-value');
+                if (cell) {
+                    var value = values && values[entry.key];
+                    cell.textContent = value ? value : '--';
+                }
+            });
+        }
 
         function updateMacModeState() {
             var vendorRadio = document.getElementById(macVendorRadioID);
             var vendorInput = document.getElementById(macVendorInputID);
+            var randomRadio = document.getElementById(macRandomRadioID);
             var explicitRadio = document.getElementById(macExplicitRadioID);
             var explicitInput = document.getElementById(macExplicitInputID);
 
-            if (vendorRadio && explicitRadio && !vendorRadio.checked && !explicitRadio.checked && !isReadonlyView)
+            if (!isReadonlyView && vendorRadio && !vendorRadio.checked &&
+                !(explicitRadio && explicitRadio.checked) &&
+                !(randomRadio && randomRadio.checked))
                 vendorRadio.checked = true;
 
             if (vendorInput)
@@ -415,10 +534,15 @@ return view.extend({
             }
 
             var mode = selected.value;
-            var input = document.getElementById(mode === 'vendor' ? macVendorInputID : macExplicitInputID);
+            var input = null;
+            if (mode === 'vendor')
+                input = document.getElementById(macVendorInputID);
+            else if (mode === 'explicit')
+                input = document.getElementById(macExplicitInputID);
+
             var data = (input ? input.value : '').trim();
 
-            if (!data) {
+            if ((mode === 'vendor' || mode === 'explicit') && !data) {
                 ui.addNotification(null, E('p', {}, _('Please provide MAC data before applying.')));
                 return;
             }
@@ -431,11 +555,21 @@ return view.extend({
                 ui.hideModal();
 
                 var assigned = result.assigned || {};
+                updateMacStatusTable(assigned);
+                readCurrentMacs().then(updateMacStatusTable);
+
                 var details = Object.keys(assigned).map(function(key) {
                     return key + ': ' + assigned[key];
                 }).join(', ');
 
-                ui.addNotification(_('MAC settings updated'), E('p', {}, details || _('Configuration saved.')));
+                var note = ui.addNotification(_('MAC settings updated'), E('p', {}, details || _('Configuration saved.')));
+                if (note) {
+                    window.setTimeout(function() {
+                        if (note.parentNode) {
+                            note.parentNode.removeChild(note);
+                        }
+                    }, 5000);
+                }
             }).catch(function(err) {
                 ui.hideModal();
                 ui.addNotification(_('MAC update failed'), E('p', {}, '' + err));
@@ -466,58 +600,93 @@ return view.extend({
 				]),
 			]),
 
-			E('div', { 'class': 'controls' }, [
-				E('div', {}, [
-					E('label', { 'for': macVendorInputID }, _('Vendor OUI prefix') + ':'),
-					E('span', { 'class': 'control-group' }, [
-						E('input', {
-							'id': macVendorRadioID,
-							'type': 'radio',
-							'name': 'mac-mode',
-							'value': 'vendor',
-							'change': handleMacModeChange,
-							'disabled': isReadonlyView
-						}),
-						' ',
-						E('label', { 'for': macVendorRadioID }, _('Generate with vendor bytes')),
-						E('input', {
+			E('div', { 'class': 'mac-settings-container' }, [
+				E('div', { 'class': 'mac-options' }, [
+					E('div', { 'class': 'mac-option' }, [
+						E('label', { 'class': 'mac-option-label', 'for': macVendorInputID }, _('Vendor OUI prefixes')),
+						E('div', { 'class': 'control-group' }, [
+							E('input', {
+								'id': macVendorRadioID,
+								'type': 'radio',
+								'name': 'mac-mode',
+								'value': 'vendor',
+								'change': handleMacModeChange,
+								'disabled': isReadonlyView
+							}),
+							E('label', { 'for': macVendorRadioID }, _('Generate with vendor bytes'))
+						]),
+						E('textarea', {
 							'id': macVendorInputID,
-							'type': 'text',
-							'placeholder': _('e.g. 00:11:22'),
+							'rows': 3,
+							'placeholder': _('One OUI per line, e.g. 00:11:22'),
 							'disabled': true
 						})
-					])
-				]),
+					]),
 
-				E('div', {}, [
-					E('label', { 'for': macExplicitInputID }, _('Explicit MAC choices') + ':'),
-					E('span', { 'class': 'control-group' }, [
-						E('input', {
-							'id': macExplicitRadioID,
-							'type': 'radio',
-							'name': 'mac-mode',
-							'value': 'explicit',
-							'change': handleMacModeChange,
-							'disabled': isReadonlyView
-						}),
-						' ',
-						E('label', { 'for': macExplicitRadioID }, _('Use provided MAC addresses')),
+					E('div', { 'class': 'mac-option' }, [
+						E('label', { 'class': 'mac-option-label', 'for': macExplicitInputID }, _('Explicit MAC choices')),
+						E('div', { 'class': 'control-group' }, [
+							E('input', {
+								'id': macExplicitRadioID,
+								'type': 'radio',
+								'name': 'mac-mode',
+								'value': 'explicit',
+								'change': handleMacModeChange,
+								'disabled': isReadonlyView
+							}),
+							E('label', { 'for': macExplicitRadioID }, _('Use provided MAC addresses'))
+						]),
 						E('textarea', {
 							'id': macExplicitInputID,
 							'rows': 3,
 							'placeholder': _('One MAC per line, e.g. AA:BB:CC:DD:EE:FF'),
 							'disabled': true
 						})
+					]),
+
+					E('div', { 'class': 'mac-option' }, [
+						E('label', { 'class': 'mac-option-label', 'for': macRandomRadioID }, _('Random MAC addresses')),
+						E('div', { 'class': 'control-group' }, [
+							E('input', {
+								'id': macRandomRadioID,
+								'type': 'radio',
+								'name': 'mac-mode',
+								'value': 'random',
+								'change': handleMacModeChange,
+								'disabled': isReadonlyView
+							}),
+							E('label', { 'for': macRandomRadioID }, _('Fully randomize each MAC address'))
+						])
+					]),
+
+					E('div', { 'class': 'mac-option' }, [
+						E('button', {
+							'id': macApplyButtonID,
+							'class': 'btn cbi-button-action mac-apply-btn',
+							'click': handleMacApply,
+							'disabled': isReadonlyView
+						}, [ _('Apply MAC settings') ])
 					])
 				]),
 
-				E('div', {}, [
-					E('button', {
-						'id': macApplyButtonID,
-						'class': 'btn cbi-button-action',
-						'click': handleMacApply,
-						'disabled': isReadonlyView
-					}, [ _('Apply MAC settings') ])
+				E('div', { 'class': 'mac-status-card' }, [
+					E('h4', {}, _('Current MACs')),
+					E('table', { 'class': 'mac-status-table', 'id': macStatusTableID }, [
+						E('thead', {}, [
+							E('tr', {}, [
+								E('th', {}, _('Interface')),
+								E('th', {}, _('MAC address'))
+							])
+						]),
+						E('tbody', {},
+							macStatusConfig.map(function(entry) {
+								return E('tr', { 'data-mac-key': entry.key }, [
+									E('td', {}, entry.label),
+									E('td', { 'class': 'mac-value' }, '--')
+								]);
+							})
+						)
+					])
 				])
 			]),
 
@@ -559,11 +728,12 @@ return view.extend({
 		readMacConfig().then(function(cfg) {
 		    var vendorRadio = document.getElementById(macVendorRadioID);
 		    var explicitRadio = document.getElementById(macExplicitRadioID);
+		    var randomRadio = document.getElementById(macRandomRadioID);
 		    var vendorInput = document.getElementById(macVendorInputID);
 		    var explicitInput = document.getElementById(macExplicitInputID);
 
 		    if (vendorInput && cfg.vendor)
-		        vendorInput.value = cfg.vendor;
+		        vendorInput.value = cfg.vendor.replace(/\s+/g, '\n');
 
 		    if (explicitInput && cfg.static)
 		        explicitInput.value = cfg.static.replace(/\s+/g, '\n');
@@ -571,6 +741,9 @@ return view.extend({
 		    if (cfg.mode === 'explicit') {
 		        if (explicitRadio)
 		            explicitRadio.checked = true;
+		    } else if (cfg.mode === 'random') {
+		        if (randomRadio)
+		            randomRadio.checked = true;
 		    } else if (vendorRadio) {
 		        vendorRadio.checked = true;
 		    }
@@ -582,6 +755,7 @@ return view.extend({
 		});
 
 		updateMacModeState();
+		readCurrentMacs().then(updateMacStatusTable);
 
 		return view;
 	},

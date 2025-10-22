@@ -46,41 +46,79 @@ RANDOMIZE_MACADDR () {
     # You need to restart the network, i.e. /etc/init.d/network restart
 }
 
+FORMAT_HEX_AS_MAC () {
+    local hex="$1"
+
+    printf '%s:%s:%s:%s:%s:%s\n' \
+        "$(printf '%.2s' "$hex")" \
+        "$(printf '%.2s' "${hex#??}")" \
+        "$(printf '%.2s' "${hex#????}")" \
+        "$(printf '%.2s' "${hex#??????}")" \
+        "$(printf '%.2s' "${hex#????????}")" \
+        "$(printf '%.2s' "${hex#??????????}")"
+}
+
+FORCE_UNICAST_HEX () {
+    local hex="$1"
+    local first rest
+
+    [ -z "$hex" ] && return 1
+
+    first=${hex:0:2}
+    rest=${hex:2}
+    first=$(printf '%02X' $(( 0x$first & 0xFE )))
+
+    printf '%s%s' "$first" "$rest"
+}
+
 NORMALIZE_MAC () {
     local mac="$1"
 
-    mac=$(printf '%s' "$mac" | tr '[:lower:]' '[:upper:]')
-    mac=${mac//[^0-9A-F]/}
+    mac=$(printf '%s' "$mac" \
+        | tr '[:lower:]' '[:upper:]' \
+        | tr -cd '0-9A-F')
+    mac=$(printf '%.12s' "$mac")
 
     if [ ${#mac} -ne 12 ]; then
         return 1
     fi
-    printf '%s:%s:%s:%s:%s:%s\n' \
-        "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" \
-        "${mac:6:2}" "${mac:8:2}" "${mac:10:2}"
+
+    mac=$(FORCE_UNICAST_HEX "$mac") || return 1
+    FORMAT_HEX_AS_MAC "$mac"
 }
 
 MAC_FROM_PREFIX () {
     local prefix="$1"
-    local vendor rand mac
+    local vendor rand mac first_octet rest
 
-    vendor=$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')
-    vendor=${vendor//[^0-9A-F]/}
-    vendor=${vendor:0:6}
+    vendor=$(printf '%s' "$prefix" \
+        | tr '[:lower:]' '[:upper:]' \
+        | tr -cd '0-9A-F')
+    vendor=$(printf '%.6s' "$vendor")
 
     if [ ${#vendor} -ne 6 ]; then
         return 1
     fi
 
-    rand=$(dd if=/dev/urandom bs=3 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    vendor=$(FORCE_UNICAST_HEX "$vendor") || return 1
+
+    rand=$(lua - <<'EOF'
+local f = io.open("/dev/urandom", "rb")
+if not f then os.exit(1) end
+local bytes = f:read(3)
+f:close()
+if not bytes or #bytes ~= 3 then os.exit(1) end
+local b = {bytes:byte(1, 3)}
+io.write(string.format("%02X%02X%02X", b[1], b[2], b[3]))
+EOF
+)
     if [ ${#rand} -ne 6 ]; then
         return 1
     fi
 
     mac="${vendor}${rand}"
-    printf '%s:%s:%s:%s:%s:%s\n' \
-        "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" \
-        "${mac:6:2}" "${mac:8:2}" "${mac:10:2}"
+    mac=$(printf '%.12s' "$mac")
+    FORMAT_HEX_AS_MAC "$mac"
 }
 
 SET_MAC_IF_AVAILABLE () {
@@ -102,6 +140,42 @@ SET_MAC_IF_AVAILABLE () {
 READ_ICCID() {
     gl_modem AT AT+CCID
 }
+
+APPLY_CONFIGURED_MACS () {
+    local mode data logtag="blue-merle-init"
+
+    mode=$(uci -q get blue-merle.mac.mode)
+    mode=${mode:-vendor}
+
+    logger -p notice -t "$logtag" "Boot applying MAC mode '$mode'"
+
+    case "$mode" in
+        vendor)
+            data=$(uci -q get blue-merle.mac.vendor_prefixes)
+            [ -n "$data" ] || data=$(uci -q get blue-merle.mac.vendor_prefix)
+            if [ -n "$data" ]; then
+                /usr/libexec/blue-merle apply-mac vendor "$(printf '%s\n' "$data" | tr ' ' '\n')" >/dev/null 2>&1 && return 0
+                logger -p err -t "$logtag" "Failed to apply vendor prefixes '$data'"
+            fi
+            ;;
+        explicit)
+            data=$(uci -q get blue-merle.mac.static_list)
+            if [ -n "$data" ]; then
+                /usr/libexec/blue-merle apply-mac explicit "$(printf '%s\n' "$data" | tr ' ' '\n')" >/dev/null 2>&1 && return 0
+                logger -p err -t "$logtag" "Failed to apply explicit MAC list '$data'"
+            fi
+            ;;
+        random)
+            /usr/libexec/blue-merle apply-mac random "" >/dev/null 2>&1 && return 0
+            logger -p err -t "$logtag" "Failed to apply random MACs"
+            ;;
+    esac
+
+    /usr/libexec/blue-merle apply-mac random "" >/dev/null 2>&1
+    return $?
+}
+
+
 
 
 READ_IMEI () {

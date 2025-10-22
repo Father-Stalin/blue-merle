@@ -16,16 +16,39 @@ ensure_mac_config_section() {
 
 sanitize_vendor_prefix() {
     local prefix="$1"
-    local vendor=$(printf '%s' "$prefix" | tr '[:lower:]' '[:upper:]')
+    local vendor
 
-    vendor=${vendor//[^0-9A-F]/}
-    vendor=${vendor:0:6}
+    vendor=$(printf '%s' "$prefix" \
+        | tr '[:lower:]' '[:upper:]' \
+        | tr -cd '0-9A-F')
+    vendor=$(printf '%.6s' "$vendor")
 
     if [ ${#vendor} -ne 6 ]; then
         return 1
     fi
 
-    printf '%s:%s:%s\n' "${vendor:0:2}" "${vendor:2:2}" "${vendor:4:2}"
+    vendor=$(FORCE_UNICAST_HEX "$vendor") || return 1
+
+    printf '%s:%s:%s\n' \
+        "$(printf '%.2s' "$vendor")" \
+        "$(printf '%.2s' "${vendor#??}")" \
+        "$(printf '%.2s' "${vendor#????}")"
+}
+
+parse_vendor_prefix_list() {
+    local raw="$1"
+    local sanitized
+    local token
+    local vendor
+
+    sanitized=$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]')
+    sanitized=$(printf '%s' "$sanitized" | tr ',\r\n' '   ' | tr -s ' ')
+
+    for token in $sanitized; do
+        if vendor=$(sanitize_vendor_prefix "$token" 2>/dev/null); then
+            printf '%s\n' "$vendor"
+        fi
+    done
 }
 
 parse_mac_list() {
@@ -58,12 +81,28 @@ random_choice_from_list() {
         return 1
     fi
 
-    rand=$(dd if=/dev/urandom bs=2 count=1 2>/dev/null | od -An -tu2)
-    rand=${rand//[[:space:]]/}
+    rand=$(
+COUNT=$count lua - <<'EOF'
+local count = tonumber(os.getenv("COUNT") or "0")
+if not count or count < 1 then
+    os.exit(1)
+end
+local f = io.open("/dev/urandom", "rb")
+if not f then os.exit(1) end
+local bytes = f:read(4)
+f:close()
+if not bytes or #bytes ~= 4 then os.exit(1) end
+local value = 0
+for i = 1, #bytes do
+    value = (value * 256 + bytes:byte(i)) % 4294967296
+end
+local idx = (value % count) + 1
+io.write(idx)
+EOF
+    )
     if [ -z "$rand" ]; then
-        rand=0
+        return 1
     fi
-    rand=$(( (rand % count) + 1 ))
 
     count=0
     for value in $list; do
@@ -125,7 +164,7 @@ apply_mac_settings() {
 }
 
 
-logger -p notice -t blue-merle-libexec  "Libexec $1"
+logger -p notice -t blue-merle-libexec "Libexec $1 args=$2"
 
 if [ "$1" == "read-imei" ]; then
     imei="$(READ_IMEI)"
@@ -159,11 +198,25 @@ elif [ "$1" == "write-imei" ]; then
     new_imei=$2
     echo -n  { "action": "write" }
 
+elif [ "$1" == "mac-status" ]; then
+    ensure_mac_config_section
+
+    wifi0=$(uci -q get wireless.@wifi-iface[0].macaddr 2>/dev/null)
+    wifi1=$(uci -q get wireless.@wifi-iface[1].macaddr 2>/dev/null)
+    device=$(uci -q get network.@device[1].macaddr 2>/dev/null)
+    clone=$(uci -q get glconfig.general.macclone_addr 2>/dev/null)
+
+    printf '{"wireless0":"%s","wireless1":"%s","network":"%s","macclone":"%s"}' \
+        "${wifi0:-}" "${wifi1:-}" "${device:-}" "${clone:-}"
+
 elif [ "$1" == "mac-config" ]; then
     ensure_mac_config_section
 
     mode=$(uci -q get blue-merle.mac.mode)
-    vendor=$(uci -q get blue-merle.mac.vendor_prefix)
+    vendor=$(uci -q get blue-merle.mac.vendor_prefixes)
+    if [ -z "$vendor" ]; then
+        vendor=$(uci -q get blue-merle.mac.vendor_prefix)
+    fi
     static=$(uci -q get blue-merle.mac.static_list)
 
     mode=${mode:-vendor}
@@ -178,33 +231,57 @@ elif [ "$1" == "apply-mac" ]; then
     data="$3"
     ensure_mac_config_section
 
+    logger -p notice -t blue-merle-libexec "apply-mac mode=$mode raw_data=${data:-<empty>}"
+
     if [ "$mode" = "vendor" ]; then
-        vendor=$(sanitize_vendor_prefix "$data")
-        if [ $? -ne 0 ]; then
-            echo "Invalid vendor prefix" >&2
+        list=$(parse_vendor_prefix_list "$data")
+        if [ -z "$list" ]; then
+            logger -p err -t blue-merle-libexec "vendor list empty after parsing"
+            echo "No valid vendor prefixes provided" >&2
             exit 1
         fi
 
-        wifi0=$(MAC_FROM_PREFIX "$vendor") || exit 1
-        wifi1=$(MAC_FROM_PREFIX "$vendor") || exit 1
-        device=$(MAC_FROM_PREFIX "$vendor") || exit 1
-        clone=$(MAC_FROM_PREFIX "$vendor") || exit 1
+        logger -p notice -t blue-merle-libexec "vendor list parsed: $list"
+
+        wifi0_vendor=$(random_choice_from_list "$list") || exit 1
+        wifi1_vendor=$(random_choice_from_list "$list") || exit 1
+        device_vendor=$(random_choice_from_list "$list") || exit 1
+        clone_vendor=$(random_choice_from_list "$list") || exit 1
+
+        logger -p notice -t blue-merle-libexec "selected vendors wifi0=$wifi0_vendor wifi1=$wifi1_vendor device=$device_vendor clone=$clone_vendor"
+
+        wifi0=$(MAC_FROM_PREFIX "$wifi0_vendor") || exit 1
+        wifi1=$(MAC_FROM_PREFIX "$wifi1_vendor") || exit 1
+        device=$(MAC_FROM_PREFIX "$device_vendor") || exit 1
+        clone=$(MAC_FROM_PREFIX "$clone_vendor") || exit 1
+
+        config_list=$(printf '%s\n' "$list" | tr '\n' ' ')
+        config_list=$(printf '%s' "$config_list" | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//')
 
         uci set blue-merle.mac.mode='vendor'
-        uci set blue-merle.mac.vendor_prefix="$vendor"
+        uci set blue-merle.mac.vendor_prefixes="$config_list"
+        uci set blue-merle.mac.vendor_prefix="$wifi0_vendor"
         uci delete blue-merle.mac.static_list 2>/dev/null
+
+        logger -p notice -t blue-merle-libexec "applying vendor MACs wifi0=$wifi0 wifi1=$wifi1 device=$device clone=$clone"
 
         applied_json=$(apply_mac_settings "$wifi0" "$wifi1" "$device" "$clone")
         uci commit blue-merle
 
-        echo -n "{\"status\":\"ok\",\"mode\":\"vendor\",\"vendor\":\"$vendor\",\"assigned\":$applied_json}"
+        logger -p notice -t blue-merle-libexec "reloading wifi to apply vendor MACs"
+        wifi reload_legacy >/dev/null 2>&1 || wifi reload >/dev/null 2>&1 || true
+
+        echo -n "{\"status\":\"ok\",\"mode\":\"vendor\",\"vendor\":\"$wifi0_vendor\",\"assigned\":$applied_json}"
 
     elif [ "$mode" = "explicit" ]; then
         list=$(parse_mac_list "$data")
         if [ -z "$list" ]; then
+            logger -p err -t blue-merle-libexec "explicit list empty after parsing"
             echo "No valid MAC addresses provided" >&2
             exit 1
         fi
+
+        logger -p notice -t blue-merle-libexec "explicit list parsed: $list"
 
         # convert back to space separated for config storage
         config_list=$(printf '%s\n' "$list" | tr '\n' ' ')
@@ -219,11 +296,38 @@ elif [ "$1" == "apply-mac" ]; then
         uci set blue-merle.mac.static_list="$config_list"
         uci delete blue-merle.mac.vendor_prefix 2>/dev/null
 
+        logger -p notice -t blue-merle-libexec "applying explicit MACs wifi0=$wifi0 wifi1=$wifi1 device=$device clone=$clone"
+
         applied_json=$(apply_mac_settings "$wifi0" "$wifi1" "$device" "$clone")
         uci commit blue-merle
 
+        logger -p notice -t blue-merle-libexec "reloading wifi to apply explicit MACs"
+        wifi reload_legacy >/dev/null 2>&1 || wifi reload >/dev/null 2>&1 || true
+
         echo -n "{\"status\":\"ok\",\"mode\":\"explicit\",\"assigned\":$applied_json}"
+    elif [ "$mode" = "random" ]; then
+        logger -p notice -t blue-merle-libexec "generating random MACs"
+        wifi0=$(UNICAST_MAC_GEN) || exit 1
+        wifi1=$(UNICAST_MAC_GEN) || exit 1
+        device=$(UNICAST_MAC_GEN) || exit 1
+        clone=$(UNICAST_MAC_GEN) || exit 1
+
+        uci set blue-merle.mac.mode='random'
+        uci delete blue-merle.mac.vendor_prefixes 2>/dev/null
+        uci delete blue-merle.mac.vendor_prefix 2>/dev/null
+        uci delete blue-merle.mac.static_list 2>/dev/null
+
+        logger -p notice -t blue-merle-libexec "applying random MACs wifi0=$wifi0 wifi1=$wifi1 device=$device clone=$clone"
+
+        applied_json=$(apply_mac_settings "$wifi0" "$wifi1" "$device" "$clone")
+        uci commit blue-merle
+
+        logger -p notice -t blue-merle-libexec "reloading wifi to apply random MACs"
+        wifi reload_legacy >/dev/null 2>&1 || wifi reload >/dev/null 2>&1 || true
+
+        echo -n "{\"status\":\"ok\",\"mode\":\"random\",\"assigned\":$applied_json}"
     else
+        logger -p err -t blue-merle-libexec "unknown mode $mode"
         echo "Unknown mode '$mode'" >&2
         exit 1
     fi
