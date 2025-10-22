@@ -54,7 +54,7 @@ NORMALIZE_MAC () {
 
     if [ ${#mac} -ne 12 ]; then
         return 1
-    fi .    
+    fi
     printf '%s:%s:%s:%s:%s:%s\n' \
         "${mac:0:2}" "${mac:2:2}" "${mac:4:2}" \
         "${mac:6:2}" "${mac:8:2}" "${mac:10:2}"

@@ -3,13 +3,12 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=blue-merle
 PKG_VERSION:=2.0.5
 PKG_RELEASE:=$(AUTORELEASE)
-override PKG_FORMAT:=ipk
+PKG_TARGETS:=ipkg
 
 PKG_MAINTAINER:=Matthias <matthias@srlabs.de>
 PKG_LICENSE:=BSD-3-Clause
 
 include $(INCLUDE_DIR)/package.mk
--include $(INCLUDE_DIR)/package-ipkg.mk
 
 define Package/blue-merle
 	SECTION:=utils
@@ -104,4 +103,7 @@ define Package/blue-merle/postrm
 	#!/bin/sh
 	uci set switch-button.@main[0].func='tor'
 endef
+_BLUE_MERLE_SAVED_CONFIG_USE_APK:=$(CONFIG_USE_APK)
+override CONFIG_USE_APK:=
 $(eval $(call BuildPackage,$(PKG_NAME)))
+override CONFIG_USE_APK:=$(_BLUE_MERLE_SAVED_CONFIG_USE_APK)
